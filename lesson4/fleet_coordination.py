@@ -25,6 +25,125 @@ from utils.visualization import (draw_city_grid, draw_vehicles,
 from utils.metrics import (calculate_fleet_metrics, analyze_belief_convergence,
                           analyze_information_value, plot_fleet_performance)
 
+class FleetCoordinationEnv:
+    """Environment for fleet coordination simulation."""
+    
+    def __init__(self, grid_size=20, num_vehicles=6, intersection_size=2):
+        """
+        Initialize the fleet coordination environment.
+        
+        Args:
+            grid_size (int): Size of the square grid
+            num_vehicles (int): Number of vehicles to simulate
+            intersection_size (int): Size of the intersection (half-width)
+        """
+        # Environment parameters
+        self.grid_size = grid_size
+        self.num_vehicles = num_vehicles
+        self.intersection_size = intersection_size
+        
+        # Initialize Pygame
+        pygame.init()
+        self.screen_size = 800
+        self.screen = pygame.display.set_mode((self.screen_size + 200, self.screen_size))
+        pygame.display.set_caption("Fleet Coordination Simulation")
+        self.clock = pygame.time.Clock()
+        
+        # Initialize simulation state
+        self.vehicles = []
+        self.emergency_active = False
+        self.emergency_start_time = None
+        self.emergency_response_times = []
+        self.communication_graph = nx.Graph()
+        
+        # Performance metrics
+        self.metrics = {
+            'collision_count': 0,
+            'emergency_response_time': [],
+            'successful_crossings': 0,
+            'total_wait_time': 0,
+            'communication_reliability': 0.0
+        }
+        
+        # Spawn initial vehicles
+        self._spawn_initial_vehicles()
+    
+    def _spawn_initial_vehicles(self):
+        """Spawn initial set of vehicles at road endpoints."""
+        # Define spawn points around the intersection
+        spawn_points = [
+            # Left side
+            ((0, self.grid_size//2 - self.intersection_size), 
+             (self.grid_size-1, self.grid_size//2 - self.intersection_size)),  # Going right
+            # Right side
+            ((self.grid_size-1, self.grid_size//2 + self.intersection_size), 
+             (0, self.grid_size//2 + self.intersection_size)),  # Going left
+            # Top side
+            ((self.grid_size//2 - self.intersection_size, 0), 
+             (self.grid_size//2 - self.intersection_size, self.grid_size-1)),  # Going down
+            # Bottom side
+            ((self.grid_size//2 + self.intersection_size, self.grid_size-1), 
+             (self.grid_size//2 + self.intersection_size, 0)),  # Going up
+        ]
+        
+        # Spawn vehicles at random spawn points
+        for i in range(self.num_vehicles):
+            # Choose random spawn configuration
+            spawn_start, spawn_goal = random.choice(spawn_points)
+            
+            # Determine vehicle type (80% standard, 15% premium, 5% emergency)
+            vehicle_type = random.choices(
+                ['standard', 'premium', 'emergency'],
+                weights=[0.8, 0.15, 0.05]
+            )[0]
+            
+            # Create vehicle
+            vehicle = BayesianVehicle(
+                vehicle_id=i,
+                initial_position=spawn_start,
+                goal=spawn_goal,
+                vehicle_type=vehicle_type
+            )
+            
+            self.vehicles.append(vehicle)
+            self.communication_graph.add_node(vehicle.id)
+    
+    def _spawn_new_vehicle(self):
+        """Spawn a new vehicle when another reaches its goal."""
+        if len(self.vehicles) < self.num_vehicles:
+            # Define spawn points (same as initial spawn)
+            spawn_points = [
+                ((0, self.grid_size//2 - self.intersection_size), 
+                 (self.grid_size-1, self.grid_size//2 - self.intersection_size)),
+                ((self.grid_size-1, self.grid_size//2 + self.intersection_size), 
+                 (0, self.grid_size//2 + self.intersection_size)),
+                ((self.grid_size//2 - self.intersection_size, 0), 
+                 (self.grid_size//2 - self.intersection_size, self.grid_size-1)),
+                ((self.grid_size//2 + self.intersection_size, self.grid_size-1), 
+                 (self.grid_size//2 + self.intersection_size, 0)),
+            ]
+            
+            # Choose random spawn point
+            spawn_start, spawn_goal = random.choice(spawn_points)
+            
+            # Determine vehicle type
+            vehicle_type = random.choices(
+                ['standard', 'premium', 'emergency'],
+                weights=[0.8, 0.15, 0.05]
+            )[0]
+            
+            # Create new vehicle with next available ID
+            next_id = max([v.id for v in self.vehicles], default=-1) + 1
+            vehicle = BayesianVehicle(
+                vehicle_id=next_id,
+                initial_position=spawn_start,
+                goal=spawn_goal,
+                vehicle_type=vehicle_type
+            )
+            
+            self.vehicles.append(vehicle)
+            self.communication_graph.add_node(vehicle.id)
+
 class FleetCoordinationEnvironment:
     """
     Environment for simulating fleet coordination with Bayesian vehicles.
@@ -39,18 +158,17 @@ class FleetCoordinationEnvironment:
         """
         # Default configuration
         self.config = {
-            'grid_size': 20,
-            'block_size': 4,
-            'num_standard_vehicles': 3,
-            'num_premium_vehicles': 1,
-            'num_emergency_vehicles': 1,
-            'max_steps': 500,
+            'grid_size': 20,  # Keep grid size but focus on center
+            'intersection_size': 2,  # Size of the intersection
+            'max_vehicles': 8,  # Maximum number of vehicles in simulation
+            'spawn_interval': 30,  # Frames between spawns (30 frames = ~1 second at 30 FPS)
+            'max_steps': 1500,
             'emergency_scenario': True,
-            'emergency_start_step': 100,
+            'emergency_start_step': 300,
             'visualization': True,
             'visualization_frequency': 1,
-            'screen_width': 1200,  # Increased resolution
-            'screen_height': 900   # Increased resolution
+            'screen_width': 1200,
+            'screen_height': 900
         }
         
         # Override defaults with provided config
@@ -64,7 +182,7 @@ class FleetCoordinationEnvironment:
                 self.config['screen_width'],
                 self.config['screen_height']
             ))
-            pygame.display.set_caption("Fleet Coordination Simulation")
+            pygame.display.set_caption("4-Way Intersection Coordination")
             self.clock = pygame.time.Clock()
         else:
             self.screen = None
@@ -81,88 +199,59 @@ class FleetCoordinationEnvironment:
         
         # State tracking
         self.current_step = 0
+        self.frames_since_last_spawn = 0
         self.emergency_active = False
         self.metrics_history = []
         self.belief_history = defaultdict(list)
         
-        # Initialize fleet
-        self._initialize_fleet()
-        
         # Store heatmap surface
         self.belief_heatmap = None
-        self.update_heatmap_frequency = 20  # Update heatmap every 20 steps
+        self.update_heatmap_frequency = 20
         
         # Debug mode flags
         self.debug_mode = False
         self.step_requested = False
         
-    def _initialize_fleet(self):
-        """Initialize the fleet of vehicles with different types."""
-        # Clear existing vehicles
-        self.vehicles = []
+        # Define spawn points and their corresponding exit points
+        self.spawn_points = {
+            'north': (self.config['grid_size']//2, 0),
+            'south': (self.config['grid_size']//2, self.config['grid_size']-1),
+            'east': (self.config['grid_size']-1, self.config['grid_size']//2),
+            'west': (0, self.config['grid_size']//2)
+        }
         
-        # Create standard vehicles
-        for _ in range(self.config['num_standard_vehicles']):
-            self._create_vehicle('standard')
-        
-        # Create premium vehicles
-        for _ in range(self.config['num_premium_vehicles']):
-            self._create_vehicle('premium')
-        
-        # Create emergency vehicles
-        for _ in range(self.config['num_emergency_vehicles']):
-            self._create_vehicle('emergency')
-            
-        # Initialize beliefs about other vehicles
-        self._initialize_beliefs()
-        
-        # Add vehicles to communication graph
-        for vehicle in self.vehicles:
-            self.communication_graph.add_node(vehicle.id)
-    
-    def _create_vehicle(self, vehicle_type):
+        # Initialize vehicle queue for each spawn point
+        self.spawn_queue = []
+
+    def _create_vehicle(self, vehicle_type=None, spawn_point=None):
         """
-        Create a new vehicle of the specified type.
+        Create a new vehicle at a specified spawn point.
         
         Args:
             vehicle_type (str): Type of vehicle to create
+            spawn_point (str): Spawn point key
         
         Returns:
             BayesianVehicle: The newly created vehicle
         """
-        # Generate random position
-        # Ensure vehicles start on roads (at grid positions divisible by block_size)
-        block_size = self.config['block_size']
-        grid_size = self.config['grid_size']
-        
-        # Random road position
-        if random.random() < 0.5:
-            # Horizontal road
-            x = random.uniform(0, grid_size)
-            y = block_size * random.randint(0, grid_size // block_size)
-        else:
-            # Vertical road
-            x = block_size * random.randint(0, grid_size // block_size)
-            y = random.uniform(0, grid_size)
+        if len(self.vehicles) >= self.config['max_vehicles']:
+            return None
             
-        position = (x, y)
-        
-        # Generate random goal on a different road
-        while True:
-            if random.random() < 0.5:
-                # Horizontal road
-                goal_x = random.uniform(0, grid_size)
-                goal_y = block_size * random.randint(0, grid_size // block_size)
-            else:
-                # Vertical road
-                goal_x = block_size * random.randint(0, grid_size // block_size)
-                goal_y = random.uniform(0, grid_size)
-                
-            goal = (goal_x, goal_y)
+        # Select random spawn point if not specified
+        if spawn_point is None:
+            spawn_point = random.choice(list(self.spawn_points.keys()))
             
-            # Ensure goal is different from position
-            if np.linalg.norm(np.array(goal) - np.array(position)) > 5.0:
-                break
+        # Select random vehicle type if not specified
+        if vehicle_type is None:
+            vehicle_type = random.choice(['standard', 'premium', 'emergency'])
+            
+        # Get spawn position
+        position = self.spawn_points[spawn_point]
+        
+        # Get possible exit points (any point except the spawn point)
+        possible_exits = [p for p in self.spawn_points.keys() if p != spawn_point]
+        exit_point = random.choice(possible_exits)
+        goal = self.spawn_points[exit_point]
         
         # Create vehicle
         vehicle = BayesianVehicle(
@@ -186,32 +275,40 @@ class FleetCoordinationEnvironment:
         # Add to vehicle list
         self.vehicles.append(vehicle)
         
+        # Add to communication graph
+        self.communication_graph.add_node(vehicle.id)
+        
+        # Initialize beliefs about other vehicles
+        self._initialize_beliefs_for_vehicle(vehicle)
+        
         return vehicle
-    
-    def _initialize_beliefs(self):
-        """Initialize beliefs for each vehicle about other vehicles' types."""
-        for vehicle in self.vehicles:
-            # Initialize beliefs about other vehicles
-            vehicle.beliefs = {}
-            
-            for other in self.vehicles:
-                if other.id != vehicle.id:
-                    # Initialize with uniform distribution
-                    vehicle.beliefs[other.id] = {
-                        'standard': 1/3,
-                        'premium': 1/3,
-                        'emergency': 1/3
-                    }
-    
+        
+    def _initialize_beliefs_for_vehicle(self, vehicle):
+        """Initialize beliefs for a single vehicle about other vehicles."""
+        vehicle.beliefs = {}
+        for other in self.vehicles:
+            if other.id != vehicle.id:
+                vehicle.beliefs[other.id] = {
+                    'standard': 1/3,
+                    'premium': 1/3,
+                    'emergency': 1/3
+                }
+
     def reset(self):
         """Reset the environment to initial state."""
         self.current_step = 0
+        self.frames_since_last_spawn = 0
         self.emergency_active = False
         self.metrics_history = []
         self.belief_history = defaultdict(list)
-        self._initialize_fleet()
+        self.vehicles = []
+        self.next_vehicle_id = 0
+        self.communication_graph = nx.DiGraph()
         
-        # Initial observation
+        # Initial vehicles
+        for _ in range(4):  # Start with one vehicle from each direction
+            self._create_vehicle()
+        
         return self._get_observation()
     
     def step(self):
@@ -224,6 +321,12 @@ class FleetCoordinationEnvironment:
             bool: Done flag
             dict: Additional info
         """
+        # Check if we should spawn a new vehicle
+        self.frames_since_last_spawn += 1
+        if self.frames_since_last_spawn >= self.config['spawn_interval']:
+            self._create_vehicle()
+            self.frames_since_last_spawn = 0
+        
         # Check if emergency scenario should activate
         if (self.config['emergency_scenario'] and 
             self.current_step == self.config['emergency_start_step']):
@@ -256,6 +359,7 @@ class FleetCoordinationEnvironment:
             vehicle.bayesian_equilibria = equilibria
         
         # Let each vehicle decide its action
+        vehicles_to_remove = []
         for vehicle in self.vehicles:
             # Get state and belief state for this vehicle
             state = self._get_vehicle_state(vehicle)
@@ -269,6 +373,18 @@ class FleetCoordinationEnvironment:
             
             # Update beliefs based on observations
             self._update_vehicle_beliefs(vehicle)
+            
+            # Check if vehicle has reached its goal
+            distance_to_goal = np.linalg.norm(
+                np.array(vehicle.position) - np.array(vehicle.final_goal)
+            )
+            if distance_to_goal < 0.5:  # Threshold for reaching goal
+                vehicles_to_remove.append(vehicle)
+        
+        # Remove vehicles that reached their goals
+        for vehicle in vehicles_to_remove:
+            self.vehicles.remove(vehicle)
+            self.communication_graph.remove_node(vehicle.id)
         
         # Calculate metrics
         metrics = calculate_fleet_metrics(
@@ -292,7 +408,8 @@ class FleetCoordinationEnvironment:
         # Additional info
         info = {
             'belief_history': self.belief_history,
-            'metrics_history': self.metrics_history
+            'metrics_history': self.metrics_history,
+            'vehicles_completed': len(vehicles_to_remove)
         }
         
         return observation, metrics, done, info
@@ -313,18 +430,18 @@ class FleetCoordinationEnvironment:
                 y = random.uniform(0, self.config['grid_size'])
                 
                 # Update goal
-                old_goal = vehicle.goal
-                vehicle.goal = (x, y)
+                old_goal = vehicle.final_goal
+                vehicle.final_goal = (x, y)
                 
                 # Update initial distance for new goal
                 vehicle.initial_distance_to_goal = np.linalg.norm(
-                    np.array(vehicle.position) - np.array(vehicle.goal)
+                    np.array(vehicle.position) - np.array(vehicle.final_goal)
                 )
                 
                 # Broadcast emergency status to all vehicles
                 for other in self.vehicles:
                     if other.id != vehicle.id:
-                        other.receive_emergency_notification(vehicle.id, vehicle.goal)
+                        other.receive_emergency_notification(vehicle.id, vehicle.final_goal)
     
     def _update_communication_graph(self):
         """Update the communication graph based on vehicle positions and capabilities."""
@@ -453,7 +570,7 @@ class FleetCoordinationEnvironment:
         state = {
             'position': vehicle.position,
             'velocity': vehicle.velocity,
-            'goal': vehicle.goal,
+            'goal': vehicle.final_goal,
             'nearby_vehicles': nearby_vehicles,
             'emergency_active': self.emergency_active,
             'time_step': self.current_step
@@ -481,7 +598,7 @@ class FleetCoordinationEnvironment:
                 'id': vehicle.id,
                 'position': vehicle.position,
                 'velocity': vehicle.velocity,
-                'goal': vehicle.goal,
+                'goal': vehicle.final_goal,
                 'type': vehicle.vehicle_type,
                 'emergency_active': getattr(vehicle, 'emergency_active', False)
             }
@@ -504,8 +621,8 @@ class FleetCoordinationEnvironment:
         # Draw city grid
         draw_city_grid(
             self.screen, 
-            self.config['grid_size'], 
-            self.config['block_size']
+            self.config['grid_size'],
+            self.config['intersection_size']  # Using intersection_size instead of block_size
         )
         
         # Draw vehicles
@@ -584,7 +701,7 @@ class FleetCoordinationEnvironment:
                     self.step_requested = True
         
         # Control rendering speed
-        self.clock.tick(10)  # 10 FPS
+        self.clock.tick(30)  # Increased to 30 FPS for smoother animation
         
         return True
 

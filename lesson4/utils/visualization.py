@@ -14,15 +14,8 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 import math
 
-def draw_city_grid(surface, grid_size, block_size):
-    """
-    Draw the city grid with blocks and roads.
-    
-    Args:
-        surface: Pygame surface to draw on
-        grid_size (int): Size of the grid
-        block_size (int): Size of city blocks
-    """
+def draw_city_grid(surface, grid_size, intersection_size):
+    """Draw the city grid with emphasis on the 4-way intersection."""
     # Get surface dimensions
     width, height = surface.get_width(), surface.get_height()
     
@@ -30,124 +23,217 @@ def draw_city_grid(surface, grid_size, block_size):
     scale_x = width / grid_size
     scale_y = height / grid_size
     
-    # Draw blocks
-    for i in range(0, grid_size, block_size):
-        for j in range(0, grid_size, block_size):
-            # Skip road positions
-            if i % block_size == 0 or j % block_size == 0:
-                continue
-                
-            # Calculate block coordinates
-            block_x = i * scale_x
-            block_y = j * scale_y
-            block_width = min(block_size, grid_size - i) * scale_x
-            block_height = min(block_size, grid_size - j) * scale_y
-            
-            # Draw block as light gray rectangle
-            pygame.draw.rect(
-                surface,
-                (200, 200, 200),
-                (block_x, block_y, block_width, block_height)
-            )
+    # Fill background
+    surface.fill((200, 200, 200))  # Light gray for non-road areas
     
-    # Draw grid lines for roads
-    for i in range(0, grid_size + 1):
-        # Horizontal roads
-        pygame.draw.line(
-            surface,
-            (100, 100, 100),
-            (0, i * scale_y),
-            (width, i * scale_y),
-            1 if i % block_size != 0 else 2
+    # Calculate intersection center and size
+    center_x = grid_size // 2
+    center_y = grid_size // 2
+    road_width = intersection_size * 2  # Width of roads is twice the intersection size
+    
+    # Draw the four roads
+    # Horizontal road
+    pygame.draw.rect(
+        surface,
+        (100, 100, 100),  # Dark gray for roads
+        (0, (center_y - road_width/2) * scale_y, 
+         width, road_width * scale_y)
+    )
+    
+    # Vertical road
+    pygame.draw.rect(
+        surface,
+        (100, 100, 100),  # Dark gray for roads
+        ((center_x - road_width/2) * scale_x, 0,
+         road_width * scale_x, height)
+    )
+    
+    # Draw intersection box
+    pygame.draw.rect(
+        surface,
+        (120, 120, 120),  # Slightly darker for intersection
+        ((center_x - road_width/2) * scale_x,
+         (center_y - road_width/2) * scale_y,
+         road_width * scale_x,
+         road_width * scale_y)
+    )
+    
+    # Draw road markings
+    line_color = (255, 255, 255)  # White for road markings
+    dash_length = scale_x * 0.5  # Scale dash length with screen size
+    gap_length = scale_x * 0.5
+    
+    # Horizontal road markings - center line
+    y_center = center_y * scale_y
+    x_start = 0
+    while x_start < width:
+        if x_start < (center_x - road_width/2) * scale_x or x_start > (center_x + road_width/2) * scale_x:
+            pygame.draw.line(
+                surface,
+                line_color,
+                (x_start, y_center),
+                (min(x_start + dash_length, width), y_center),
+                2
+            )
+        x_start += dash_length + gap_length
+    
+    # Vertical road markings - center line
+    x_center = center_x * scale_x
+    y_start = 0
+    while y_start < height:
+        if y_start < (center_y - road_width/2) * scale_y or y_start > (center_y + road_width/2) * scale_y:
+            pygame.draw.line(
+                surface,
+                line_color,
+                (x_center, y_start),
+                (x_center, min(y_start + dash_length, height)),
+                2
+            )
+        y_start += dash_length + gap_length
+    
+    # Draw stop lines at intersection
+    line_thickness = max(2, int(scale_x * 0.1))  # Scale line thickness
+    
+    # North stop line
+    pygame.draw.line(
+        surface,
+        (255, 255, 255),
+        ((center_x - road_width/2) * scale_x, (center_y - road_width/2) * scale_y),
+        ((center_x + road_width/2) * scale_x, (center_y - road_width/2) * scale_y),
+        line_thickness
+    )
+    
+    # South stop line
+    pygame.draw.line(
+        surface,
+        (255, 255, 255),
+        ((center_x - road_width/2) * scale_x, (center_y + road_width/2) * scale_y),
+        ((center_x + road_width/2) * scale_x, (center_y + road_width/2) * scale_y),
+        line_thickness
+    )
+    
+    # West stop line
+    pygame.draw.line(
+        surface,
+        (255, 255, 255),
+        ((center_x - road_width/2) * scale_x, (center_y - road_width/2) * scale_y),
+        ((center_x - road_width/2) * scale_x, (center_y + road_width/2) * scale_y),
+        line_thickness
+    )
+    
+    # East stop line
+    pygame.draw.line(
+        surface,
+        (255, 255, 255),
+        ((center_x + road_width/2) * scale_x, (center_y - road_width/2) * scale_y),
+        ((center_x + road_width/2) * scale_x, (center_y + road_width/2) * scale_y),
+        line_thickness
+    )
+    
+    # Draw direction arrows on roads
+    arrow_color = (255, 255, 255)
+    arrow_length = scale_x * 1.0  # Scale arrow size with screen
+    arrow_width = scale_x * 0.5
+    
+    # Helper function to draw arrow
+    def draw_arrow(surface, start_pos, direction):
+        end_pos = (
+            start_pos[0] + direction[0] * arrow_length,
+            start_pos[1] + direction[1] * arrow_length
         )
         
-        # Vertical roads
-        pygame.draw.line(
-            surface,
-            (100, 100, 100),
-            (i * scale_x, 0),
-            (i * scale_x, height),
-            1 if i % block_size != 0 else 2
-        )
+        # Draw arrow shaft
+        pygame.draw.line(surface, arrow_color, start_pos, end_pos, max(2, int(scale_x * 0.1)))
+        
+        # Calculate arrow head points
+        angle = math.pi / 6  # 30 degrees
+        direction_norm = math.sqrt(direction[0]**2 + direction[1]**2)
+        dx = direction[0] / direction_norm
+        dy = direction[1] / direction_norm
+        
+        right_x = end_pos[0] - arrow_width * (dx * math.cos(angle) + dy * math.sin(angle))
+        right_y = end_pos[1] - arrow_width * (-dx * math.sin(angle) + dy * math.cos(angle))
+        
+        left_x = end_pos[0] - arrow_width * (dx * math.cos(-angle) + dy * math.sin(-angle))
+        left_y = end_pos[1] - arrow_width * (-dx * math.sin(-angle) + dy * math.cos(-angle))
+        
+        # Draw arrow head
+        pygame.draw.polygon(surface, arrow_color, [end_pos, (right_x, right_y), (left_x, left_y)])
     
-    # Highlight intersections
-    for i in range(block_size, grid_size, block_size):
-        for j in range(block_size, grid_size, block_size):
-            pygame.draw.circle(
-                surface,
-                (150, 150, 150),
-                (i * scale_x, j * scale_y),
-                5
-            )
+    # Draw multiple arrows for each direction
+    arrow_spacing = road_width * scale_x * 0.8
+    
+    # Left to right arrows
+    for x in range(3):
+        draw_arrow(surface, 
+                ((center_x - 2*road_width + x*road_width) * scale_x, 
+                (center_y - road_width/4) * scale_y),
+                (1, 0))
+    
+    # Right to left arrows
+    for x in range(3):
+        draw_arrow(surface,
+                ((center_x + 2*road_width - x*road_width) * scale_x,
+                (center_y + road_width/4) * scale_y),
+                (-1, 0))
+    
+    # Top to bottom arrows
+    for y in range(3):
+        draw_arrow(surface,
+                ((center_x - road_width/4) * scale_x,
+                (center_y - 2*road_width + y*road_width) * scale_y),
+                (0, 1))
+    
+    # Bottom to top arrows
+    for y in range(3):
+        draw_arrow(surface,
+                ((center_x + road_width/4) * scale_x,
+                (center_y + 2*road_width - y*road_width) * scale_y),
+                (0, -1))
 
-def draw_vehicles(surface, vehicles):
-    """
-    Draw all vehicles on the surface.
+def draw_vehicles(screen, vehicles):
+    """Draw vehicles and their paths on the screen."""
+    # Get screen dimensions
+    width = screen.get_width() - 200  # Adjust for info panel
+    height = screen.get_height()
     
-    Args:
-        surface: Pygame surface to draw on
-        vehicles (list): List of BayesianVehicle objects
-    """
-    # Get surface dimensions
-    width, height = surface.get_width(), surface.get_height()
-    
-    # Draw each vehicle
     for vehicle in vehicles:
-        # Scale position to surface
+        # Draw vehicle position
         pos_x = vehicle.position[0] * (width / 20)
         pos_y = vehicle.position[1] * (height / 20)
         
-        # Choose color based on vehicle type
-        if vehicle.vehicle_type == 'standard':
-            color = (0, 0, 255)  # Blue
+        # Draw goal position
+        goal_x = vehicle.final_goal[0] * (width / 20)
+        goal_y = vehicle.final_goal[1] * (height / 20)
+        
+        # Set color based on vehicle type
+        if vehicle.vehicle_type == 'emergency':
+            color = (255, 0, 0)  # Red for emergency
         elif vehicle.vehicle_type == 'premium':
-            color = (0, 255, 0)  # Green
-        elif vehicle.vehicle_type == 'emergency':
-            color = (255, 0, 0)  # Red
+            color = (0, 255, 0)  # Green for premium
         else:
-            color = (255, 255, 255)  # White
+            color = (0, 0, 255)  # Blue for standard
         
-        # Draw vehicle as a circle - larger size
-        pygame.draw.circle(surface, color, (int(pos_x), int(pos_y)), 12)
+        # Draw vehicle as circle
+        pygame.draw.circle(screen, color, (int(pos_x), int(pos_y)), 8)
         
-        # Draw direction indicator
-        if vehicle.velocity[0] != 0 or vehicle.velocity[1] != 0:
-            direction = np.array(vehicle.velocity)
-            direction_norm = np.linalg.norm(direction)
-            if direction_norm > 0.001:  # Avoid division by zero
-                direction = direction / direction_norm
-                endpoint = (
-                    int(pos_x + direction[0] * 20),  # Longer direction indicator
-                    int(pos_y + direction[1] * 20)
-                )
-                pygame.draw.line(surface, color, (int(pos_x), int(pos_y)), endpoint, 3)  # Thicker line
+        # Draw emergency vehicle indicator
+        if vehicle.vehicle_type == 'emergency':
+            pygame.draw.circle(screen, color, (int(pos_x), int(pos_y)), 12, 2)
         
-        # Draw vehicle ID - larger font
-        font = pygame.font.SysFont('Arial', 14, bold=True)  # Larger, bold font
-        text_surface = font.render(str(vehicle.id), True, (0, 0, 0))
-        text_rect = text_surface.get_rect(center=(int(pos_x), int(pos_y)))
-        surface.blit(text_surface, text_rect)
+        # Draw goal as small circle
+        pygame.draw.circle(screen, color, (int(goal_x), int(goal_y)), 3, 1)
         
-        # Draw goal indicator - larger
-        goal_x = vehicle.goal[0] * (width / 20)
-        goal_y = vehicle.goal[1] * (height / 20)
-        pygame.draw.circle(surface, color, (int(goal_x), int(goal_y)), 5, 2)  # Larger goal indicator
+        # Draw line to goal
+        pygame.draw.line(screen, color, (pos_x, pos_y), (goal_x, goal_y), 1)
         
-        # Draw line to goal - thicker
-        pygame.draw.line(surface, color, (int(pos_x), int(pos_y)), (int(goal_x), int(goal_y)), 2)  # Thicker goal line
+        # If waiting at intersection, draw indicator
+        if hasattr(vehicle, 'waiting_at_intersection') and vehicle.waiting_at_intersection:
+            pygame.draw.circle(screen, (255, 255, 0), (int(pos_x), int(pos_y)), 10, 1)
         
-        # Highlight emergency vehicles on active duty - larger highlight
-        if vehicle.vehicle_type == 'emergency' and getattr(vehicle, 'emergency_active', False):
-            pygame.draw.circle(surface, (255, 0, 0), (int(pos_x), int(pos_y)), 18, 3)  # Larger highlight
-            
-            # Draw pulsating effect - larger
-            pygame.draw.circle(
-                surface,
-                (255, 100, 100),
-                (int(pos_x), int(pos_y)),
-                22,  # Larger pulsating effect
-                2    # Thicker line
-            )
+        # If giving way to emergency vehicle, draw indicator
+        if hasattr(vehicle, 'give_way_to_emergency') and vehicle.give_way_to_emergency:
+            pygame.draw.circle(screen, (255, 165, 0), (int(pos_x), int(pos_y)), 12, 1)
 
 def draw_belief_states(surface, vehicles):
     """

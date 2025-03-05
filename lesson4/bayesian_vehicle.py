@@ -31,136 +31,338 @@ class BayesianVehicle:
         """
         self.id = vehicle_id
         self.position = initial_position
-        self.last_position = None
-        self.goal = goal
+        self.final_goal = goal  # Store the final goal
+        self.current_goal = self._get_intermediate_waypoint(initial_position, goal)  # Current waypoint goal
         self.vehicle_type = vehicle_type
         
-        # Motion state
-        self.velocity = (0.0, 0.0)
-        self.max_speed = self._get_max_speed_by_type()
-        self.last_action = (0.0, 0.0)  # (acceleration, steering)
-        self.reward = 0.0
+        # Movement properties
+        self.velocity = [0, 0]
+        self.max_speed = self._get_max_speed()
+        self.sensor_range = self._get_sensor_range()
+        self.comm_reliability = self._get_comm_reliability()
+        self.wall_collision_margin = 1.0  # Margin for wall collisions
         
-        # Sensor and communication capabilities
-        self.sensor_range = self._get_sensor_range_by_type()
-        self.comm_reliability = self._get_comm_reliability_by_type()
+        # State tracking
+        self.beliefs = {}
+        self.last_action = (0, 0)  # acceleration, steering
+        self.path = []
+        self.waiting_at_intersection = False
+        self.intersection_priority = 0
+        self.time_waiting = 0
         
-        # Emergency handling
+        # Emergency properties
         self.emergency_active = False
         self.emergency_start_time = None
-        
-        # Beliefs about other vehicles' types
-        self.beliefs = {}  # {vehicle_id: {type: probability}}
-        self.observation_history = defaultdict(list)  # {vehicle_id: [observations]}
-        
-        # Bayesian game state
-        self.bayesian_equilibria = None
-        
-        # Type-dependent utilities
-        self.utility_weights = self._initialize_utility_weights()
+        self.give_way_to_emergency = False
     
-    def _get_max_speed_by_type(self):
+    def _get_max_speed(self):
         """Get maximum speed based on vehicle type."""
-        max_speeds = {
-            'standard': 1.0,
-            'premium': 1.2,
-            'emergency': 1.5
-        }
-        return max_speeds.get(self.vehicle_type, 1.0)
-    
-    def _get_sensor_range_by_type(self):
-        """Get sensor range based on vehicle type."""
-        sensor_ranges = {
-            'standard': 5.0,
-            'premium': 7.0,
-            'emergency': 8.0
-        }
-        return sensor_ranges.get(self.vehicle_type, 5.0)
-    
-    def _get_comm_reliability_by_type(self):
-        """Get communication reliability based on vehicle type."""
-        reliability = {
-            'standard': 0.9,
-            'premium': 0.95,
-            'emergency': 0.99
-        }
-        return reliability.get(self.vehicle_type, 0.9)
-    
-    def _initialize_utility_weights(self):
-        """Initialize utility weights based on vehicle type."""
-        if self.vehicle_type == 'standard':
-            return {
-                'goal_progress': 0.5,
-                'safety': 0.3,
-                'efficiency': 0.2,
-                'emergency_priority': 0.0
-            }
+        base_speed = 0.04  # 25x slower than original
+        if self.vehicle_type == 'emergency':
+            return base_speed * 1.5  # Faster for emergency vehicles
         elif self.vehicle_type == 'premium':
-            return {
-                'goal_progress': 0.4,
-                'safety': 0.3,
-                'efficiency': 0.3,
-                'emergency_priority': 0.0
-            }
-        elif self.vehicle_type == 'emergency':
-            return {
-                'goal_progress': 0.6,
-                'safety': 0.2,
-                'efficiency': 0.1,
-                'emergency_priority': 0.1
-            }
+            return base_speed * 1.2  # Slightly faster for premium
         else:
-            return {
-                'goal_progress': 0.5,
-                'safety': 0.3,
-                'efficiency': 0.2,
-                'emergency_priority': 0.0
-            }
+            return base_speed  # Standard speed
     
-    def update_state(self, action):
+    def _get_sensor_range(self):
+        """Get sensor range based on vehicle type."""
+        if self.vehicle_type == 'emergency':
+            return 8.0  # Better sensors for emergency
+        elif self.vehicle_type == 'premium':
+            return 6.0  # Better sensors for premium
+        else:
+            return 4.0  # Standard range
+    
+    def _get_comm_reliability(self):
+        """Get communication reliability based on vehicle type."""
+        if self.vehicle_type == 'emergency':
+            return 0.95  # Most reliable
+        elif self.vehicle_type == 'premium':
+            return 0.85  # More reliable
+        else:
+            return 0.75  # Standard reliability
+    
+    def _get_intermediate_waypoint(self, current_pos, goal):
+        """Calculate intermediate waypoint to avoid center of intersection."""
+        # Center of the grid (assuming 20x20 grid)
+        center_x, center_y = 10, 10
+        intersection_radius = 3  # Radius to go around intersection
+        
+        # Determine which quadrant the current position and goal are in
+        curr_quad = self._get_quadrant(current_pos)
+        goal_quad = self._get_quadrant(goal)
+        
+        # If crossing the intersection
+        if curr_quad != goal_quad:
+            # Calculate waypoint based on clockwise movement around intersection
+            angle = self._get_waypoint_angle(curr_quad, goal_quad)
+            waypoint_x = center_x + intersection_radius * np.cos(angle)
+            waypoint_y = center_y + intersection_radius * np.sin(angle)
+            return (waypoint_x, waypoint_y)
+        else:
+            # If in same quadrant, return final goal
+            return goal
+    
+    def _get_quadrant(self, position):
+        """Determine which quadrant a position is in (1-4, clockwise from top-right)."""
+        x, y = position
+        center_x, center_y = 10, 10
+        
+        if x >= center_x and y < center_y:
+            return 1  # Top-right
+        elif x >= center_x and y >= center_y:
+            return 2  # Bottom-right
+        elif x < center_x and y >= center_y:
+            return 3  # Bottom-left
+        else:
+            return 4  # Top-left
+    
+    def _get_waypoint_angle(self, current_quad, goal_quad):
+        """Calculate angle for waypoint based on current and goal quadrants."""
+        # Base angles for each quadrant (in radians)
+        quad_angles = {
+            1: 0,           # Right
+            2: np.pi/2,     # Bottom
+            3: np.pi,       # Left
+            4: -np.pi/2     # Top
+        }
+        
+        # Get base angle for current quadrant
+        angle = quad_angles[current_quad]
+        
+        # Adjust angle based on goal quadrant to ensure clockwise movement
+        if goal_quad <= current_quad:
+            goal_quad += 4
+        steps = goal_quad - current_quad
+        angle += (steps * np.pi/2) / 2  # Divide by 2 to get midpoint
+        
+        return angle
+    
+    def decide_action(self, state, belief_state):
         """
-        Update vehicle state based on action.
+        Decide next action using Bayesian game theory.
         
         Args:
-            action (tuple/array): (acceleration, steering) action
-        """
-        # Store last position
-        self.last_position = self.position
+            state (dict): Current state information
+            belief_state (dict): Current beliefs about other vehicles
         
-        # Extract action components (acceleration, steering)
-        acceleration, steering = action[0], action[1]
+        Returns:
+            tuple: (acceleration, steering) action
+        """
+        # Check if we've reached the current waypoint
+        curr_pos = np.array(self.position)
+        curr_goal = np.array(self.current_goal)
+        dist_to_waypoint = np.linalg.norm(curr_goal - curr_pos)
+        
+        if dist_to_waypoint < 0.5:  # If reached waypoint
+            if self.current_goal != self.final_goal:
+                # Update to next waypoint or final goal
+                self.current_goal = self._get_intermediate_waypoint(self.position, self.final_goal)
+                curr_goal = np.array(self.current_goal)
+        
+        # Calculate direction to current goal (waypoint or final)
+        goal_vector = curr_goal - curr_pos
+        distance_to_goal = np.linalg.norm(goal_vector)
+        
+        if distance_to_goal > 0:
+            direction = goal_vector / distance_to_goal
+        else:
+            direction = np.array([0, 0])
+        
+        # Add wall avoidance
+        direction = self._avoid_walls(direction)
+        
+        # Initialize acceleration and steering
+        acceleration = 0
+        steering = 0
+        
+        # Check for nearby vehicles
+        nearby_vehicles = state.get('nearby_vehicles', [])
+        
+        # Emergency vehicle behavior
+        if self.vehicle_type == 'emergency' and self.emergency_active:
+            # Emergency vehicles get priority and move at max speed
+            acceleration = self.max_speed
+            steering = self._calculate_steering(direction, nearby_vehicles)
+            self.waiting_at_intersection = False
+            return acceleration, steering
+        
+        # Handle intersection behavior
+        in_intersection = self._is_in_intersection(self.position)
+        if in_intersection:
+            if not self.waiting_at_intersection:
+                # We've just entered the intersection
+                self._evaluate_intersection_priority(nearby_vehicles, belief_state)
+            
+            # Check if we should proceed through intersection
+            can_proceed = self._can_proceed_through_intersection(nearby_vehicles)
+            
+            if can_proceed:
+                # Proceed through intersection
+                acceleration = self.max_speed
+                self.waiting_at_intersection = False
+                self.time_waiting = 0
+            else:
+                # Wait at intersection
+                acceleration = 0
+                self.waiting_at_intersection = True
+                self.time_waiting += 1
+        else:
+            # Normal road behavior
+            self.waiting_at_intersection = False
+            self.time_waiting = 0
+            
+            # Adjust speed based on nearby vehicles
+            safe_distance = self._calculate_safe_distance(nearby_vehicles)
+            if safe_distance:
+                acceleration = min(self.max_speed, safe_distance)
+            else:
+                acceleration = self.max_speed
+        
+        # Calculate steering to avoid collisions
+        steering = self._calculate_steering(direction, nearby_vehicles)
         
         # Store last action
         self.last_action = (acceleration, steering)
         
-        # Update velocity based on acceleration and steering
-        speed = math.sqrt(self.velocity[0]**2 + self.velocity[1]**2)
-        if speed < 0.01:  # If almost stationary, use default direction
-            direction = self._get_direction_to_goal()
-            new_velocity = (
-                acceleration * direction[0],
-                acceleration * direction[1]
-            )
-        else:
-            # Normalize current velocity to get direction
-            direction = (self.velocity[0] / speed, self.velocity[1] / speed)
-            
-            # Apply steering to change direction
-            c, s = math.cos(steering), math.sin(steering)
-            new_direction = (
-                c * direction[0] - s * direction[1],
-                s * direction[0] + c * direction[1]
-            )
-            
-            # Combine acceleration and direction
-            new_speed = min(speed + acceleration, self.max_speed)
-            new_speed = max(new_speed, 0)  # Prevent negative speed
-            new_velocity = (
-                new_speed * new_direction[0],
-                new_speed * new_direction[1]
-            )
+        return acceleration, steering
+    
+    def _evaluate_intersection_priority(self, nearby_vehicles, belief_state):
+        """Evaluate priority for crossing the intersection."""
+        self.intersection_priority = 0
         
-        self.velocity = new_velocity
+        # Base priority on vehicle type
+        if self.vehicle_type == 'emergency':
+            self.intersection_priority += 100
+        elif self.vehicle_type == 'premium':
+            self.intersection_priority += 50
+        else:
+            self.intersection_priority += 25
+        
+        # Add priority based on waiting time
+        self.intersection_priority += self.time_waiting * 5
+        
+        # Consider beliefs about nearby vehicles
+        for vehicle in nearby_vehicles:
+            if vehicle['id'] in belief_state:
+                beliefs = belief_state[vehicle['id']]
+                # Reduce priority if we believe others are emergency vehicles
+                if beliefs.get('emergency', 0) > 0.5:
+                    self.intersection_priority -= 30
+    
+    def _can_proceed_through_intersection(self, nearby_vehicles):
+        """Determine if it's safe to proceed through intersection."""
+        # Emergency vehicles always proceed
+        if self.vehicle_type == 'emergency' and self.emergency_active:
+            return True
+        
+        # Check each nearby vehicle
+        for vehicle in nearby_vehicles:
+            # Calculate relative position
+            rel_pos = np.array([vehicle['position'][0] - self.position[0],
+                              vehicle['position'][1] - self.position[1]])
+            distance = np.linalg.norm(rel_pos)
+            
+            # If vehicle is too close, don't proceed
+            if distance < 1.5:
+                return False
+            
+            # If vehicle has higher priority and is close, don't proceed
+            if (hasattr(vehicle, 'intersection_priority') and 
+                vehicle.intersection_priority > self.intersection_priority and
+                distance < 3):
+                return False
+        
+        return True
+    
+    def _calculate_safe_distance(self, nearby_vehicles):
+        """Calculate safe following distance based on nearby vehicles."""
+        min_safe_distance = None
+        
+        for vehicle in nearby_vehicles:
+            # Calculate relative position and velocity
+            rel_pos = np.array([vehicle['position'][0] - self.position[0],
+                              vehicle['position'][1] - self.position[1]])
+            distance = np.linalg.norm(rel_pos)
+            
+            # If vehicle is in front of us
+            if distance < self.sensor_range:
+                safe_distance = distance - 1.0  # Maintain 1 unit minimum gap
+                if min_safe_distance is None or safe_distance < min_safe_distance:
+                    min_safe_distance = max(0, safe_distance)
+        
+        return min_safe_distance
+    
+    def _calculate_steering(self, goal_direction, nearby_vehicles):
+        """Calculate steering to avoid collisions while moving towards goal."""
+        # Start with direction to goal
+        steering_vector = goal_direction.copy()
+        
+        # Add avoidance vectors from nearby vehicles
+        for vehicle in nearby_vehicles:
+            rel_pos = np.array([vehicle['position'][0] - self.position[0],
+                              vehicle['position'][1] - self.position[1]])
+            distance = np.linalg.norm(rel_pos)
+            
+            if distance < self.sensor_range and distance > 0.001:  # Avoid division by zero
+                # Calculate repulsion vector (stronger at closer distances)
+                repulsion = -rel_pos / (distance * distance)
+                steering_vector += repulsion
+        
+        # Normalize steering vector
+        steering_norm = np.linalg.norm(steering_vector)
+        if steering_norm > 0.001:  # Avoid division by very small numbers
+            steering_vector = steering_vector / steering_norm
+        
+        return steering_vector
+    
+    def _avoid_walls(self, direction):
+        """Add wall avoidance behavior to direction vector."""
+        pos_x, pos_y = self.position
+        margin = self.wall_collision_margin
+        
+        # Get repulsion from walls
+        wall_force = np.zeros(2)
+        
+        # Left wall
+        if pos_x < margin:
+            wall_force[0] += (margin - pos_x) / margin
+        # Right wall
+        elif pos_x > 19 - margin:
+            wall_force[0] -= (pos_x - (19 - margin)) / margin
+        # Top wall
+        if pos_y < margin:
+            wall_force[1] += (margin - pos_y) / margin
+        # Bottom wall
+        elif pos_y > 19 - margin:
+            wall_force[1] -= (pos_y - (19 - margin)) / margin
+        
+        # Combine original direction with wall avoidance
+        new_direction = direction + wall_force
+        
+        # Normalize if non-zero
+        norm = np.linalg.norm(new_direction)
+        if norm > 0:
+            new_direction = new_direction / norm
+        
+        return new_direction
+    
+    def _is_in_intersection(self, position):
+        """Check if position is in the intersection zone."""
+        center_x, center_y = 10, 10
+        x, y = position
+        intersection_size = 2
+        return (abs(x - center_x) < intersection_size and 
+                abs(y - center_y) < intersection_size)
+    
+    def update_state(self, action):
+        """Update vehicle state based on action."""
+        acceleration, steering = action
+        
+        # Update velocity (with steering influence)
+        self.velocity[0] = steering[0] * acceleration
+        self.velocity[1] = steering[1] * acceleration
         
         # Update position
         new_position = (
@@ -168,508 +370,153 @@ class BayesianVehicle:
             self.position[1] + self.velocity[1]
         )
         
-        # Ensure the vehicle stays on the road (simplified for now)
-        # In a real implementation, this would check against the road network
-        self.position = new_position
+        # Ensure we stay within bounds (20x20 grid)
+        self.position = (
+            max(0, min(19, new_position[0])),
+            max(0, min(19, new_position[1]))
+        )
     
-    def _get_direction_to_goal(self):
-        """Calculate normalized direction vector pointing to goal."""
-        dx = self.goal[0] - self.position[0]
-        dy = self.goal[1] - self.position[1]
-        distance = math.sqrt(dx**2 + dy**2)
-        
-        if distance < 0.001:
-            return (0, 0)  # Already at goal
-            
-        return (dx / distance, dy / distance)
-    
-    def update_belief(self, other_vehicle_id, observation):
-        """
-        Update belief about another vehicle's type based on observation.
-        
-        Args:
-            other_vehicle_id (int): ID of the observed vehicle
-            observation (dict): Observation of the vehicle
-        """
-        # Skip if no prior belief exists
-        if other_vehicle_id not in self.beliefs:
-            return
-            
-        # Store observation in history
-        self.observation_history[other_vehicle_id].append(observation)
-        
-        # Extract relevant features from observation
-        position = observation.get('position')
-        velocity = observation.get('velocity')
-        acceleration = observation.get('acceleration', 0)
-        steering = observation.get('steering', 0)
-        
-        # Calculate likelihood of observation given each type
-        likelihoods = {}
-        
-        # Extract speed from velocity
-        speed = math.sqrt(velocity[0]**2 + velocity[1]**2) if velocity else 0
-        
-        # Likelihood models for different vehicle types
-        for vehicle_type in self.beliefs[other_vehicle_id].keys():
-            if vehicle_type == 'standard':
-                # Standard vehicles typically have moderate speed and acceleration
-                speed_likelihood = self._gaussian(speed, 1.0, 0.3)
-                accel_likelihood = self._gaussian(abs(acceleration), 0.5, 0.3)
-            elif vehicle_type == 'premium':
-                # Premium vehicles might have higher speeds and smoother acceleration
-                speed_likelihood = self._gaussian(speed, 1.2, 0.3)
-                accel_likelihood = self._gaussian(abs(acceleration), 0.7, 0.2)
-            elif vehicle_type == 'emergency':
-                # Emergency vehicles typically have higher speeds and accelerations
-                speed_likelihood = self._gaussian(speed, 1.5, 0.4)
-                accel_likelihood = self._gaussian(abs(acceleration), 0.9, 0.3)
-            else:
-                # Default model
-                speed_likelihood = 1.0
-                accel_likelihood = 1.0
-            
-            # Combine likelihoods (assuming independence)
-            likelihoods[vehicle_type] = speed_likelihood * accel_likelihood
-        
-        # Apply Bayes' rule to update beliefs
-        prior = self.beliefs[other_vehicle_id]
-        posterior = {}
-        
-        # Calculate normalization factor
-        normalization = sum(likelihoods[t] * prior[t] for t in prior)
-        
-        if normalization > 0:
-            # Update beliefs using Bayes' rule
-            for vehicle_type in prior:
-                posterior[vehicle_type] = (likelihoods[vehicle_type] * prior[vehicle_type]) / normalization
-            
-            # Update beliefs
-            self.beliefs[other_vehicle_id] = posterior
-    
-    def _gaussian(self, x, mean, std_dev):
-        """
-        Calculate Gaussian probability density.
-        
-        Args:
-            x (float): Value
-            mean (float): Mean of distribution
-            std_dev (float): Standard deviation
-        
-        Returns:
-            float: Probability density
-        """
-        return math.exp(-((x - mean) ** 2) / (2 * std_dev ** 2)) / (std_dev * math.sqrt(2 * math.pi))
-    
-    def decide_action(self, state, belief_state):
-        """
-        Decide action based on state and belief state.
-        
-        Args:
-            state (dict): Current state information
-            belief_state (dict): Current belief state about other vehicles
-            
-        Returns:
-            tuple: (acceleration, steering) action
-        """
-        # Use Bayesian equilibria if available
-        if self.bayesian_equilibria is not None and len(self.bayesian_equilibria) > 0:
-            # Choose the equilibrium with highest expected utility for this vehicle
-            best_equilibrium = None
-            best_utility = float('-inf')
-            
-            for eq in self.bayesian_equilibria:
-                # Extract this vehicle's strategy in this equilibrium
-                if self.id in eq['strategies']:
-                    utility = self._evaluate_equilibrium_utility(eq)
-                    if utility > best_utility:
-                        best_utility = utility
-                        best_equilibrium = eq
-            
-            if best_equilibrium:
-                # Convert the strategy to an action
-                return self._strategy_to_action(best_equilibrium['strategies'].get(self.id))
-        
-        # Fallback to heuristic decision making
-        return self._heuristic_decision(state)
-    
-    def _evaluate_equilibrium_utility(self, equilibrium):
-        """
-        Evaluate expected utility of an equilibrium.
-        
-        Args:
-            equilibrium (dict): Equilibrium strategies and expected utilities
-            
-        Returns:
-            float: Expected utility for this vehicle
-        """
-        # If the equilibrium has precomputed utilities, use those
-        if 'utilities' in equilibrium and self.id in equilibrium['utilities']:
-            return equilibrium['utilities'][self.id]
-        
-        # Otherwise, compute utility based on the strategies
-        return self.compute_expected_utility(equilibrium['strategies'].get(self.id, None), self.beliefs)
-    
-    def _strategy_to_action(self, strategy):
-        """
-        Convert a strategy to a concrete action.
-        
-        Args:
-            strategy: Strategy representation (could be discrete action index or distribution)
-            
-        Returns:
-            tuple: (acceleration, steering) action
-        """
-        if strategy is None:
-            # Default action if no strategy provided
-            return self._heuristic_decision(None)
-        
-        # If strategy is an action distribution, sample from it
-        if isinstance(strategy, dict) or isinstance(strategy, list):
-            # Sample action from distribution
-            if isinstance(strategy, dict):
-                actions = list(strategy.keys())
-                probs = list(strategy.values())
-            else:
-                actions = list(range(len(strategy)))
-                probs = strategy
-                
-            action_idx = np.random.choice(actions, p=probs)
-            
-            # Map action index to continuous action
-            # This mapping depends on the action space definition
-            action_map = {
-                0: (0.0, 0.0),      # Maintain
-                1: (0.2, 0.0),      # Accelerate
-                2: (-0.2, 0.0),     # Decelerate
-                3: (0.0, -0.2),     # Turn left
-                4: (0.0, 0.2)       # Turn right
+    def update_belief(self, other_id, observation):
+        """Update beliefs about another vehicle based on observation."""
+        if other_id not in self.beliefs:
+            self.beliefs[other_id] = {
+                'standard': 1/3,
+                'premium': 1/3,
+                'emergency': 1/3
             }
-            
-            return action_map.get(action_idx, (0.0, 0.0))
         
-        # If strategy is already an action, return it
-        if isinstance(strategy, tuple) and len(strategy) == 2:
-            return strategy
+        # Extract features from observation
+        speed = np.linalg.norm(observation['velocity'])
+        acceleration = observation['acceleration']
         
-        # Fallback
-        return self._heuristic_decision(None)
+        # Update beliefs based on observed behavior
+        if speed > 1.3:  # Fast movement suggests emergency
+            self._update_type_probability(other_id, 'emergency', 0.6)
+        elif speed > 1.1:  # Moderately fast suggests premium
+            self._update_type_probability(other_id, 'premium', 0.6)
+        else:  # Normal speed suggests standard
+            self._update_type_probability(other_id, 'standard', 0.6)
     
-    def _heuristic_decision(self, state):
-        """
-        Make a heuristic decision when Bayesian equilibrium is not available.
+    def _update_type_probability(self, other_id, vehicle_type, confidence):
+        """Update probability of a specific vehicle type."""
+        # Increase probability of observed type
+        self.beliefs[other_id][vehicle_type] *= confidence
         
-        Args:
-            state (dict): Current state information or None
-            
-        Returns:
-            tuple: (acceleration, steering) action
-        """
-        # Simple goal-seeking behavior
-        direction = self._get_direction_to_goal()
-        
-        # Calculate desired velocity
-        desired_speed = self.max_speed
-        desired_velocity = (desired_speed * direction[0], desired_speed * direction[1])
-        
-        # Calculate acceleration to reach desired velocity
-        accel_x = desired_velocity[0] - self.velocity[0]
-        accel_y = desired_velocity[1] - self.velocity[1]
-        
-        # Normalize and scale acceleration
-        accel_magnitude = math.sqrt(accel_x**2 + accel_y**2)
-        if accel_magnitude > 0.5:
-            accel_x = (accel_x / accel_magnitude) * 0.5
-            accel_y = (accel_y / accel_magnitude) * 0.5
-        
-        # Convert to scalar acceleration and steering
-        current_speed = math.sqrt(self.velocity[0]**2 + self.velocity[1]**2)
-        
-        if current_speed < 0.01:
-            # If almost stationary, just accelerate in goal direction
-            acceleration = min(0.5, desired_speed)
-            steering = 0.0
-        else:
-            # Project acceleration onto velocity direction to get scalar acceleration
-            vel_direction = (self.velocity[0] / current_speed, self.velocity[1] / current_speed)
-            acceleration = accel_x * vel_direction[0] + accel_y * vel_direction[1]
-            
-            # Calculate steering based on cross product
-            # This is a simplified steering model
-            steering = accel_x * vel_direction[1] - accel_y * vel_direction[0]
-            steering = max(-0.5, min(0.5, steering))  # Limit steering angle
-        
-        return (acceleration, steering)
+        # Normalize probabilities
+        total = sum(self.beliefs[other_id].values())
+        if total > 0:
+            for type_name in self.beliefs[other_id]:
+                self.beliefs[other_id][type_name] /= total
     
-    def communicate(self, other_vehicles, communication_type='broadcast'):
-        """
-        Communicate with other vehicles to share information.
-        
-        Args:
-            other_vehicles (list): List of vehicles to communicate with
-            communication_type (str): Type of communication protocol
-        """
-        if communication_type == 'broadcast':
-            # Broadcast own position, velocity, and type if emergency
+    def communicate(self, neighbors):
+        """Communicate with neighboring vehicles."""
+        # Send information to neighbors
+        for neighbor in neighbors:
             if self.vehicle_type == 'emergency' and self.emergency_active:
-                for other in other_vehicles:
-                    # Check if communication succeeds based on reliability
-                    if random.random() < self.comm_reliability:
-                        other.receive_communication(self.id, {
-                            'position': self.position,
-                            'velocity': self.velocity,
-                            'type': self.vehicle_type,
-                            'emergency': True,
-                            'goal': self.goal
-                        })
-            else:
-                # Regular broadcast
-                for other in other_vehicles:
-                    if random.random() < self.comm_reliability:
-                        other.receive_communication(self.id, {
-                            'position': self.position,
-                            'velocity': self.velocity
-                        })
-        elif communication_type == 'targeted':
-            # More selective information sharing based on relevance
-            for other in other_vehicles:
-                # Determine what information is relevant to share
-                if self._is_interaction_likely(other):
-                    if random.random() < self.comm_reliability:
-                        other.receive_communication(self.id, {
-                            'position': self.position,
-                            'velocity': self.velocity,
-                            'intention': self._get_intention()
-                        })
-    
-    def _is_interaction_likely(self, other_vehicle):
-        """
-        Determine if interaction with another vehicle is likely.
-        
-        Args:
-            other_vehicle: The other vehicle
+                neighbor.receive_emergency_notification(self.id, self.final_goal)
             
-        Returns:
-            bool: True if interaction is likely
-        """
-        # Calculate distance
-        distance = math.sqrt(
-            (self.position[0] - other_vehicle.position[0])**2 +
-            (self.position[1] - other_vehicle.position[1])**2
-        )
-        
-        # Check if vehicles are moving toward each other
-        if distance < 5.0:
-            return True
+            # Share observations and beliefs
+            neighbor.receive_observation(self.id, {
+                'position': self.position,
+                'velocity': self.velocity,
+                'type': self.vehicle_type,
+                'acceleration': self.last_action[0]  # Add acceleration from last action
+            })
             
-        # Calculate relative velocity
-        rel_vel_x = self.velocity[0] - other_vehicle.velocity[0]
-        rel_vel_y = self.velocity[1] - other_vehicle.velocity[1]
-        
-        # Calculate time to closest approach
-        pos_diff_x = other_vehicle.position[0] - self.position[0]
-        pos_diff_y = other_vehicle.position[1] - self.position[1]
-        
-        # Dot product of position difference and relative velocity
-        dot_product = pos_diff_x * rel_vel_x + pos_diff_y * rel_vel_y
-        
-        # Squared magnitude of relative velocity
-        rel_vel_sq = rel_vel_x**2 + rel_vel_y**2
-        
-        if rel_vel_sq < 0.0001:
-            return False  # Vehicles not moving relative to each other
-            
-        # Time to closest approach
-        t_closest = -dot_product / rel_vel_sq
-        
-        if t_closest < 0 or t_closest > 10.0:
-            return False  # Closest approach in past or too far in future
-            
-        # Position at closest approach
-        closest_x = self.position[0] + self.velocity[0] * t_closest
-        closest_y = self.position[1] + self.velocity[1] * t_closest
-        other_closest_x = other_vehicle.position[0] + other_vehicle.velocity[0] * t_closest
-        other_closest_y = other_vehicle.position[1] + other_vehicle.velocity[1] * t_closest
-        
-        # Distance at closest approach
-        closest_distance = math.sqrt(
-            (closest_x - other_closest_x)**2 +
-            (closest_y - other_closest_y)**2
-        )
-        
-        return closest_distance < 2.0
+            # Share beliefs if confident
+            for other_id, beliefs in self.beliefs.items():
+                if max(beliefs.values()) > 0.8:  # Only share if confident
+                    neighbor.receive_belief(other_id, beliefs)
     
-    def _get_intention(self):
-        """
-        Get current intention (e.g., turn at next intersection).
-        
-        Returns:
-            dict: Intention information
-        """
-        # Calculate direction to goal
-        goal_direction = self._get_direction_to_goal()
-        
-        # Simplified intention
-        return {
-            'heading': goal_direction,
-            'target': self.goal
-        }
-    
-    def receive_communication(self, sender_id, data):
-        """
-        Process received communication from another vehicle.
-        
-        Args:
-            sender_id (int): ID of sending vehicle
-            data (dict): Received data
-        """
-        # Update beliefs if type information is received
-        if 'type' in data:
-            # Direct observation of type (e.g., from emergency vehicle broadcast)
-            self.beliefs[sender_id] = {t: 1.0 if t == data['type'] else 0.0 
-                                      for t in self.beliefs.get(sender_id, {})}
-        
-        # If it's an emergency vehicle, adjust behavior
-        if data.get('emergency', False):
-            self._respond_to_emergency(sender_id, data)
-    
-    def receive_emergency_notification(self, emergency_vehicle_id, emergency_destination):
-        """
-        Process emergency notification and adjust behavior.
-        
-        Args:
-            emergency_vehicle_id (int): ID of emergency vehicle
-            emergency_destination (tuple): Destination of emergency vehicle
-        """
-        # Update belief to be certain this is an emergency vehicle
-        if emergency_vehicle_id in self.beliefs:
-            self.beliefs[emergency_vehicle_id] = {
+    def receive_emergency_notification(self, emergency_id, emergency_goal):
+        """Receive notification of emergency vehicle status."""
+        if emergency_id in self.beliefs:
+            # Update beliefs to reflect emergency status
+            self.beliefs[emergency_id] = {
                 'standard': 0.0,
                 'premium': 0.0,
                 'emergency': 1.0
             }
         
-        # Adjust utility weights to prioritize giving way to emergency vehicles
-        if self.vehicle_type != 'emergency':
-            self.utility_weights['emergency_priority'] = 0.3
-            # Reduce other weights proportionally
-            total = sum(self.utility_weights.values())
-            scale = (1.0 - self.utility_weights['emergency_priority']) / (total - self.utility_weights['emergency_priority'])
-            
-            for key in self.utility_weights:
-                if key != 'emergency_priority':
-                    self.utility_weights[key] *= scale
+        # Adjust own behavior if in path of emergency vehicle
+        if self._is_in_emergency_path(emergency_goal):
+            self.give_way_to_emergency = True
     
-    def _respond_to_emergency(self, emergency_vehicle_id, data):
+    def _is_in_emergency_path(self, emergency_goal):
         """
-        Adjust behavior in response to nearby emergency vehicle.
+        Check if this vehicle is in the path of an emergency vehicle.
         
         Args:
-            emergency_vehicle_id (int): ID of emergency vehicle
-            data (dict): Data about the emergency vehicle
-        """
-        # Similar to receive_emergency_notification but with more detail if available
-        self.receive_emergency_notification(emergency_vehicle_id, data.get('goal', None))
-    
-    def compute_expected_utility(self, action, belief_state):
-        """
-        Compute expected utility of an action given belief state.
-        
-        Args:
-            action: Action to evaluate
-            belief_state (dict): Beliefs about other vehicles' types
+            emergency_goal (tuple): Goal position of emergency vehicle
             
         Returns:
-            float: Expected utility
+            bool: True if vehicle is in emergency path
         """
-        if action is None:
-            return 0.0
-            
-        # Convert action to continuous form if needed
-        if not isinstance(action, tuple):
-            action = self._strategy_to_action(action)
-            
-        # Simulate action to evaluate outcome
-        old_position = self.position
-        old_velocity = self.velocity
+        # Get current position relative to center of intersection
+        curr_x, curr_y = self.position
+        center_x, center_y = 10, 10  # Center of 20x20 grid
         
-        # Temporarily update state to evaluate action
-        self.update_state(action)
+        # Determine which road segments we're on (horizontal or vertical)
+        on_horizontal_road = abs(curr_y - center_y) < 2
+        on_vertical_road = abs(curr_x - center_x) < 2
         
-        # Calculate utility components
-        goal_progress = self._calculate_goal_progress()
-        safety = self._calculate_safety()
-        efficiency = self._calculate_efficiency()
-        emergency_priority = self._calculate_emergency_priority()
+        # Get emergency vehicle's approach direction
+        emergency_x, emergency_y = emergency_goal
+        emergency_horizontal = abs(emergency_y - center_y) < 2
+        emergency_vertical = abs(emergency_x - center_x) < 2
         
-        # Restore original state
-        self.position = old_position
-        self.velocity = old_velocity
+        # If we're on the same road as the emergency vehicle's path
+        if (on_horizontal_road and emergency_horizontal) or (on_vertical_road and emergency_vertical):
+            # Check if we're between the emergency vehicle and its goal
+            if on_horizontal_road:
+                # Check if we're between emergency vehicle and its goal horizontally
+                if emergency_x > center_x and curr_x > center_x:
+                    return True
+                if emergency_x < center_x and curr_x < center_x:
+                    return True
+            if on_vertical_road:
+                # Check if we're between emergency vehicle and its goal vertically
+                if emergency_y > center_y and curr_y > center_y:
+                    return True
+                if emergency_y < center_y and curr_y < center_y:
+                    return True
         
-        # Combine utilities with weights
-        utility = (
-            self.utility_weights['goal_progress'] * goal_progress +
-            self.utility_weights['safety'] * safety +
-            self.utility_weights['efficiency'] * efficiency +
-            self.utility_weights['emergency_priority'] * emergency_priority
-        )
+        # If we're in the intersection and emergency vehicle needs to pass through
+        if on_horizontal_road and on_vertical_road:  # We're in intersection
+            if emergency_horizontal or emergency_vertical:
+                return True
         
-        return utility
+        return False
     
-    def _calculate_goal_progress(self):
-        """Calculate utility component for progress towards goal."""
-        # Calculate distance to goal
-        distance = math.sqrt(
-            (self.position[0] - self.goal[0])**2 +
-            (self.position[1] - self.goal[1])**2
-        )
-        
-        # Normalize by initial distance (approximate)
-        if hasattr(self, 'initial_distance_to_goal'):
-            normalized = 1.0 - distance / self.initial_distance_to_goal
-        else:
-            # Estimate initial distance if not set
-            self.initial_distance_to_goal = 20.0  # Rough estimate
-            normalized = 1.0 - distance / self.initial_distance_to_goal
-        
-        return max(0.0, min(1.0, normalized))
-    
-    def _calculate_safety(self):
-        """Calculate utility component for safety."""
-        # Placeholder for safety calculation based on distance to other vehicles
-        # In a full implementation, this would consider proximity to other known vehicles
-        return 1.0  # Simplified placeholder
-    
-    def _calculate_efficiency(self):
-        """Calculate utility component for efficiency."""
-        # Calculate speed as a fraction of max speed
-        speed = math.sqrt(self.velocity[0]**2 + self.velocity[1]**2)
-        return min(1.0, speed / self.max_speed)
-    
-    def _calculate_emergency_priority(self):
-        """Calculate utility component for emergency priority."""
-        if self.vehicle_type == 'emergency' and self.emergency_active:
-            # Emergency vehicle on active duty gets high priority
-            return 1.0
-        else:
-            # Non-emergency vehicles should yield to emergency vehicles
-            return 0.0
-    
-    def compute_bayesian_nash(self, game_state):
+    def receive_belief(self, other_id, beliefs):
         """
-        Compute Bayesian Nash equilibrium for a given game state.
-        
-        This is a placeholder - actual computation should typically
-        be done by the BayesianGameAnalyzer class.
+        Receive and update beliefs about another vehicle from a neighbor.
         
         Args:
-            game_state (dict): Description of the current game state
-            
-        Returns:
-            list: Possible Bayesian Nash equilibria
+            other_id (int): ID of the vehicle the beliefs are about
+            beliefs (dict): Dictionary of beliefs about vehicle types
         """
-        # This method would typically delegate to the game analyzer
-        if hasattr(self, 'env') and hasattr(self.env, 'game_analyzer'):
-            return self.env.game_analyzer.find_bayesian_nash_equilibria(game_state)
+        if other_id not in self.beliefs:
+            self.beliefs[other_id] = beliefs.copy()
         else:
-            return []  # Return empty list if no analyzer is available
+            # Combine received beliefs with existing beliefs
+            for vehicle_type, probability in beliefs.items():
+                if probability > self.beliefs[other_id].get(vehicle_type, 0):
+                    self.beliefs[other_id][vehicle_type] = probability
+            
+            # Normalize probabilities
+            total = sum(self.beliefs[other_id].values())
+            if total > 0:
+                for type_name in self.beliefs[other_id]:
+                    self.beliefs[other_id][type_name] /= total
+
+    def receive_observation(self, other_id, observation):
+        """
+        Receive and process observation data from another vehicle.
+        
+        Args:
+            other_id (int): ID of the observed vehicle
+            observation (dict): Contains observed vehicle data (position, velocity, type)
+        """
+        # Update beliefs based on observation
+        self.update_belief(other_id, observation)
