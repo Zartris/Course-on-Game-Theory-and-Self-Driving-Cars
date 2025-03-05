@@ -87,7 +87,7 @@ class BayesianVehicle:
         """Calculate intermediate waypoint to avoid center of intersection."""
         # Center of the grid (assuming 20x20 grid)
         center_x, center_y = 10, 10
-        intersection_radius = 3  # Radius to go around intersection
+        intersection_radius = 1.5  # Reduced radius to pass closer to center
         
         # Determine which quadrant the current position and goal are in
         curr_quad = self._get_quadrant(current_pos)
@@ -352,7 +352,7 @@ class BayesianVehicle:
         """Check if position is in the intersection zone."""
         center_x, center_y = 10, 10
         x, y = position
-        intersection_size = 2
+        intersection_size = 1.5  # Match the waypoint radius for consistent behavior
         return (abs(x - center_x) < intersection_size and 
                 abs(y - center_y) < intersection_size)
     
