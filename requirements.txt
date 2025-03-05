@@ -1,0 +1,17 @@
+# Core dependencies
+numpy>=1.19.0
+matplotlib>=3.3.0
+gymnasium>=0.29.0
+
+# Game theory libraries
+nashpy>=0.0.19
+
+# For future lessons
+pandas>=1.3.0
+scipy>=1.5.0
+
+# For visualizing scenarios
+pygame>=2.0.0
+
+pomegranate # for Bayesian networks
+networkx>=2.5.0 # For visualizing communication graphs
